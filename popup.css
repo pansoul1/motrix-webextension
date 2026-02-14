@@ -104,6 +104,44 @@ body {
   transition: background 0.3s;
 }
 
+.status-panel {
+  padding: 10px 12px;
+  border-radius: 10px;
+  margin-bottom: 16px;
+  background: #ffffff;
+  border: 1px solid #e9ecef;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.status-panel.success {
+  border-color: #c8e6c9;
+  background: #f1f8e9;
+}
+
+.status-panel.warning {
+  border-color: #ffe0b2;
+  background: #fff8e1;
+}
+
+.status-panel.error {
+  border-color: #ffcdd2;
+  background: #ffebee;
+}
+
+.status-panel-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #343a40;
+  margin-bottom: 4px;
+}
+
+.status-panel-message {
+  font-size: 12px;
+  color: #495057;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
 .status-bar.disabled {
   background: #fbe9e7;
 }
@@ -150,6 +188,22 @@ body {
 /* Form */
 .form-group {
   margin-bottom: 10px;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #495057;
+  user-select: none;
+}
+
+.checkbox input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: #4361ee;
 }
 
 .form-group label {
@@ -203,13 +257,12 @@ body {
 }
 
 .btn-primary {
-  background: #4361ee;
+  background: #2563eb;
   color: white;
 }
 
 .btn-primary:hover {
-  background: #3a56d4;
-  box-shadow: 0 2px 8px rgba(67, 97, 238, 0.3);
+  background: #1d4ed8;
 }
 
 .btn-primary:active {
@@ -230,7 +283,7 @@ body {
 }
 
 .btn-save {
-  background: linear-gradient(135deg, #4361ee, #3a0ca3);
+  background: #1e293b;
   color: white;
   margin-top: 4px;
   padding: 11px;
@@ -238,7 +291,7 @@ body {
 }
 
 .btn-save:hover {
-  box-shadow: 0 4px 12px rgba(67, 97, 238, 0.35);
+  background: #334155;
 }
 
 .btn-save:active {

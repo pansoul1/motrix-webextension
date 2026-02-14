@@ -56,6 +56,13 @@
 3. 通过 `aria2.addUri` JSON-RPC 请求发送到 Motrix
 4. 弹出通知提示下载成功或失败
 
+## 失败回退（推荐开启）
+
+当 Motrix 未启动或 RPC 请求失败时，扩展会根据设置自动 **恢复浏览器原生下载**，避免“下载被取消但 Motrix 没接住”的情况。
+
+- **开关位置：** 弹窗 → 过滤设置 → `Motrix 不可用时恢复浏览器下载`
+- **实现方式：** 失败时调用 `chrome.downloads.download()` 重新发起下载，并对该 URL 做短暂跳过以避免再次被拦截
+
 ## 环境要求
 
 - **Chromium 内核浏览器**（Chrome、Edge、Brave 等）

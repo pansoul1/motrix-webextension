@@ -6,6 +6,8 @@ const DEFAULT_CONFIG = {
   enabled: true,
   rpcUrl: 'http://localhost:16800/jsonrpc',
   rpcSecret: '',
+  fallbackToBrowser: true,
+  showMotrixOnSuccess: true,
   fileExtensions: '',
   minFileSize: 0
 };
@@ -20,10 +22,16 @@ const testBtn = document.getElementById('testBtn');
 const testResult = document.getElementById('testResult');
 const fileExtensions = document.getElementById('fileExtensions');
 const minFileSize = document.getElementById('minFileSize');
+const fallbackToBrowser = document.getElementById('fallbackToBrowser');
+const showMotrixOnSuccess = document.getElementById('showMotrixOnSuccess');
 const manualUrl = document.getElementById('manualUrl');
 const downloadBtn = document.getElementById('downloadBtn');
 const downloadResult = document.getElementById('downloadResult');
 const saveBtn = document.getElementById('saveBtn');
+
+const statusPanel = document.getElementById('statusPanel');
+const statusPanelTitle = document.getElementById('statusPanelTitle');
+const statusPanelMessage = document.getElementById('statusPanelMessage');
 
 // 初始化：从 storage 加载配置
 async function loadConfig() {
@@ -34,8 +42,37 @@ async function loadConfig() {
   rpcSecret.value = config.rpcSecret;
   fileExtensions.value = config.fileExtensions;
   minFileSize.value = config.minFileSize || '';
+  fallbackToBrowser.checked = !!config.fallbackToBrowser;
+  showMotrixOnSuccess.checked = !!config.showMotrixOnSuccess;
 
   updateStatusBar(config.enabled);
+}
+
+function formatTime(ts) {
+  try {
+    return new Date(ts).toLocaleTimeString();
+  } catch (e) {
+    return '';
+  }
+}
+
+function updateStatusPanel(status) {
+  if (!status || !status.title) {
+    statusPanel.style.display = 'none';
+    return;
+  }
+
+  statusPanel.style.display = 'block';
+  statusPanel.className = `status-panel ${status.level || ''}`.trim();
+
+  const time = status.ts ? ` · ${formatTime(status.ts)}` : '';
+  statusPanelTitle.textContent = `${status.title}${time}`;
+  statusPanelMessage.textContent = status.message || '';
+}
+
+async function loadLastStatus() {
+  const result = await chrome.storage.local.get({ lastStatus: null });
+  updateStatusPanel(result.lastStatus);
 }
 
 // 更新状态栏显示
@@ -94,7 +131,7 @@ testBtn.addEventListener('click', async () => {
     showResult(testResult, `❌ 连接失败: ${err.message}`, false);
   } finally {
     testBtn.disabled = false;
-    testBtn.innerHTML = '<span class="btn-icon">🔗</span>测试连接';
+    testBtn.textContent = '测试连接';
   }
 });
 
@@ -130,7 +167,7 @@ downloadBtn.addEventListener('click', async () => {
     showResult(downloadResult, `❌ 发送失败: ${err.message}`, false);
   } finally {
     downloadBtn.disabled = false;
-    downloadBtn.innerHTML = '<span class="btn-icon">⬇️</span>发送到 Motrix';
+    downloadBtn.textContent = '发送到 Motrix';
   }
 });
 
@@ -140,6 +177,8 @@ saveBtn.addEventListener('click', async () => {
     enabled: toggleEnabled.checked,
     rpcUrl: rpcUrl.value.trim() || DEFAULT_CONFIG.rpcUrl,
     rpcSecret: rpcSecret.value.trim(),
+    fallbackToBrowser: fallbackToBrowser.checked,
+    showMotrixOnSuccess: showMotrixOnSuccess.checked,
     fileExtensions: fileExtensions.value.trim(),
     minFileSize: parseInt(minFileSize.value) || 0
   };
@@ -164,3 +203,10 @@ manualUrl.addEventListener('keydown', (e) => {
 
 // 页面加载时读取配置
 loadConfig();
+loadLastStatus();
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message && message.type === 'statusUpdate' && message.status) {
+    updateStatusPanel(message.status);
+  }
+});
