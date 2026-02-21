@@ -7,13 +7,17 @@ const DEFAULT_CONFIG = {
   rpcUrl: 'http://localhost:16800/jsonrpc',
   rpcSecret: '',
   fallbackToBrowser: true,
-  showMotrixOnSuccess: true,   // 下载成功后是否调起 Motrix 到前台
-  fileExtensions: '',  // 留空表示拦截所有，否则填写如 "zip,exe,dmg,iso,torrent"
-  minFileSize: 0       // 最小文件大小（字节），0 表示不限制
+  showMotrixOnSuccess: true,
+  fileExtensions: '',
+  minFileSize: 0
 };
 
 const SKIP_URL_TTL_MS = 15000;
 const skipUrlUntil = new Map();
+
+// 等待最终文件名的下载项 { downloadId -> { url, referrer, config } }
+const pendingDownloads = new Map();
+const PENDING_TIMEOUT_MS = 8000;
 
 function shouldSkipUrl(url) {
   const until = skipUrlUntil.get(url);
@@ -35,10 +39,58 @@ async function resumeBrowserDownload(url, filename) {
   return chrome.downloads.download(options);
 }
 
-// 从 storage 读取配置
 async function getConfig() {
   const result = await chrome.storage.sync.get(DEFAULT_CONFIG);
   return result;
+}
+
+// 通过 HEAD 请求尝试从 Content-Disposition 或最终 URL 获取真实文件名
+async function resolveFilename(url) {
+  try {
+    const resp = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(5000)
+    });
+
+    // 优先从 Content-Disposition 解析
+    const cd = resp.headers.get('content-disposition');
+    if (cd) {
+      // filename*=UTF-8''xxx 格式
+      const utf8Match = cd.match(/filename\*\s*=\s*(?:UTF-8|utf-8)?''(.+?)(?:;|$)/i);
+      if (utf8Match) {
+        return decodeURIComponent(utf8Match[1].trim());
+      }
+      // filename="xxx" 或 filename=xxx
+      const match = cd.match(/filename\s*=\s*"?([^";]+)"?/i);
+      if (match) {
+        return match[1].trim();
+      }
+    }
+
+    // 从最终重定向后的 URL 提取
+    const finalUrl = resp.url || url;
+    if (finalUrl !== url) {
+      const name = extractFilename(finalUrl);
+      if (name && !looksLikeSlug(name)) {
+        return name;
+      }
+    }
+  } catch (e) {
+    // HEAD 请求失败不影响主流程
+  }
+  return '';
+}
+
+// 判断文件名是否看起来像 URL slug（无扩展名、含连字符的路径段）
+function looksLikeSlug(name) {
+  if (!name) return true;
+  const dotIdx = name.lastIndexOf('.');
+  if (dotIdx === -1 || dotIdx === name.length - 1) return true;
+  const ext = name.substring(dotIdx + 1);
+  // 扩展名超过 10 个字符大概率不是真实扩展名
+  if (ext.length > 10) return true;
+  return false;
 }
 
 function getFriendlyRpcErrorMessage(err) {
@@ -82,10 +134,22 @@ async function postJsonRpc(rpcUrl, rpcBody) {
 
 async function bringMotrixToFront() {
   try {
+    // 优先通过 content script 用隐藏 iframe 触发（不会切走当前页面）
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab && tab.id) {
-      chrome.tabs.sendMessage(tab.id, { type: 'openMotrix' });
+    if (tab && tab.id && tab.url && /^https?:/.test(tab.url)) {
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: 'openMotrix' });
+        return;
+      } catch (e) {
+        // content script 可能未注入，走备选方案
+      }
     }
+
+    // 备选：创建临时标签页触发 motrix:// 协议，然后关闭
+    const tempTab = await chrome.tabs.create({ url: 'motrix://', active: false });
+    setTimeout(() => {
+      chrome.tabs.remove(tempTab.id).catch(() => {});
+    }, 2000);
   } catch (e) {
     console.warn('[Motrix] 无法唤起 Motrix:', e);
   }
@@ -143,7 +207,45 @@ function buildRpcRequest(method, params) {
   };
 }
 
-// 发送请求到 Motrix / aria2
+// 检测 RPC 连接失败是否属于"Motrix 未启动"（网络不可达）
+function isConnectionError(err) {
+  const msg = (err && err.message) ? err.message : String(err);
+  return /failed to fetch|networkerror|econnrefused|net::err_connection_refused|connect/i.test(msg);
+}
+
+// 尝试启动 Motrix 并等待 RPC 可用
+async function launchMotrixAndWait(rpcUrl, rpcSecret) {
+  // 通过 content script 用 motrix:// 协议启动
+  await bringMotrixToFront();
+
+  await setLastStatus({
+    level: 'warning',
+    title: '正在启动 Motrix…',
+    message: '检测到 Motrix 未运行，正在尝试启动，请稍候'
+  });
+
+  // 轮询等待 RPC 可用，最多等 15 秒（间隔 1.5s 检测一次）
+  const MAX_WAIT = 15000;
+  const INTERVAL = 1500;
+  const start = Date.now();
+
+  while (Date.now() - start < MAX_WAIT) {
+    await new Promise(r => setTimeout(r, INTERVAL));
+    try {
+      let params = [];
+      if (rpcSecret) params = [`token:${rpcSecret}`];
+      const body = buildRpcRequest('aria2.getVersion', params);
+      const data = await postJsonRpc(rpcUrl, body);
+      if (data.result) return true;
+    } catch (e) {
+      // 还没启动好，继续等
+    }
+  }
+
+  return false;
+}
+
+// 发送请求到 Motrix / aria2（含自动启动重试）
 async function sendToAria2(url, filename, referrer) {
   const config = await getConfig();
 
@@ -164,14 +266,32 @@ async function sendToAria2(url, filename, referrer) {
 
   const rpcBody = buildRpcRequest('aria2.addUri', params);
 
-  try {
+  const attemptSend = async () => {
     const data = await postJsonRpc(config.rpcUrl, rpcBody);
-
     if (data.error) {
       throw new Error(data.error.message || 'aria2 RPC 错误');
     }
+    return data;
+  };
 
-    // 成功通知
+  try {
+    let data;
+    try {
+      data = await attemptSend();
+    } catch (firstErr) {
+      // 如果是连接错误（Motrix 未启动），尝试自动启动后重试
+      if (isConnectionError(firstErr)) {
+        const launched = await launchMotrixAndWait(config.rpcUrl, config.rpcSecret);
+        if (launched) {
+          data = await attemptSend();
+        } else {
+          throw firstErr;
+        }
+      } else {
+        throw firstErr;
+      }
+    }
+
     chrome.notifications.create({
       type: 'basic',
       iconUrl: 'icons/icon128.png',
@@ -185,7 +305,6 @@ async function sendToAria2(url, filename, referrer) {
       message: filename || url
     });
 
-    // 调起 Motrix 到前台
     if (config.showMotrixOnSuccess) {
       bringMotrixToFront();
     }
@@ -256,43 +375,16 @@ function shouldIntercept(url, filename, config) {
 // =============================================
 // 监听下载事件
 // =============================================
-chrome.downloads.onCreated.addListener(async (downloadItem) => {
-  const config = await getConfig();
 
-  // 未启用拦截
-  if (!config.enabled) {
-    return;
-  }
-
-  const url = downloadItem.url;
-  if (shouldSkipUrl(url)) {
-    return;
-  }
-  const filename = downloadItem.filename
-    ? downloadItem.filename.split(/[/\\]/).pop()
-    : extractFilename(url);
-
-  if (!shouldIntercept(url, filename, config)) {
-    return;
-  }
-
-  // 检查最小文件大小
-  const minBytes = (config.minFileSize || 0) * 1024;
-  if (minBytes > 0 && downloadItem.fileSize > 0 && downloadItem.fileSize < minBytes) {
-    return;
-  }
-
-  // 取消浏览器下载
+// 实际执行拦截：取消浏览器下载 → 发送到 aria2
+async function interceptDownload(downloadId, url, filename, referrer, config) {
   try {
-    await chrome.downloads.cancel(downloadItem.id);
-    // 从下载列表中移除记录
-    chrome.downloads.erase({ id: downloadItem.id });
+    await chrome.downloads.cancel(downloadId);
+    chrome.downloads.erase({ id: downloadId });
   } catch (e) {
     console.warn('[Motrix] 取消下载失败:', e);
   }
 
-  // 发送到 Motrix
-  const referrer = downloadItem.referrer || '';
   try {
     await sendToAria2(url, filename, referrer);
   } catch (err) {
@@ -330,6 +422,111 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
       });
     }
   }
+}
+
+chrome.downloads.onCreated.addListener(async (downloadItem) => {
+  const config = await getConfig();
+
+  if (!config.enabled) return;
+
+  const url = downloadItem.url;
+  if (shouldSkipUrl(url)) return;
+
+  // 只拦截 http/https，跳过 blob:/data:
+  if (!url.startsWith('http://') && !url.startsWith('https://')) return;
+  if (url.startsWith('blob:') || url.startsWith('data:')) return;
+
+  const referrer = downloadItem.referrer || '';
+
+  // downloadItem.filename 在 onCreated 时通常为空，
+  // 需要等 onChanged 事件拿到浏览器解析后的最终文件名
+  const earlyName = downloadItem.filename
+    ? downloadItem.filename.split(/[/\\]/).pop()
+    : '';
+
+  // 如果已经有一个看起来正常的文件名（有扩展名），直接处理
+  if (earlyName && !looksLikeSlug(earlyName)) {
+    if (!shouldIntercept(url, earlyName, config)) return;
+
+    const minBytes = (config.minFileSize || 0) * 1024;
+    if (minBytes > 0 && downloadItem.fileSize > 0 && downloadItem.fileSize < minBytes) return;
+
+    await interceptDownload(downloadItem.id, url, earlyName, referrer, config);
+    return;
+  }
+
+  // 文件名尚未确定，暂停浏览器下载并等待 onChanged 提供最终文件名
+  try {
+    await chrome.downloads.pause(downloadItem.id);
+  } catch (e) {
+    // 可能已经完成了，忽略
+  }
+
+  pendingDownloads.set(downloadItem.id, {
+    url,
+    referrer,
+    config,
+    urlFilename: extractFilename(url),
+    timer: setTimeout(async () => {
+      // 超时兜底：如果 onChanged 迟迟没给文件名，用 HEAD 请求解析
+      const pending = pendingDownloads.get(downloadItem.id);
+      if (!pending) return;
+      pendingDownloads.delete(downloadItem.id);
+
+      let filename = pending.urlFilename;
+      const resolved = await resolveFilename(url);
+      if (resolved && !looksLikeSlug(resolved)) {
+        filename = resolved;
+      }
+
+      if (!shouldIntercept(url, filename, config)) {
+        try { await chrome.downloads.resume(downloadItem.id); } catch (e) {}
+        return;
+      }
+
+      const minBytes = (config.minFileSize || 0) * 1024;
+      if (minBytes > 0 && downloadItem.fileSize > 0 && downloadItem.fileSize < minBytes) {
+        try { await chrome.downloads.resume(downloadItem.id); } catch (e) {}
+        return;
+      }
+
+      await interceptDownload(downloadItem.id, url, filename, referrer, config);
+    }, PENDING_TIMEOUT_MS)
+  });
+});
+
+// 监听下载项变化，获取浏览器解析后的最终文件名
+chrome.downloads.onChanged.addListener(async (delta) => {
+  if (!delta.filename) return;
+
+  const pending = pendingDownloads.get(delta.id);
+  if (!pending) return;
+
+  clearTimeout(pending.timer);
+  pendingDownloads.delete(delta.id);
+
+  const finalPath = delta.filename.current || '';
+  const filename = finalPath.split(/[/\\]/).pop() || pending.urlFilename;
+
+  const { url, referrer, config } = pending;
+
+  if (!shouldIntercept(url, filename, config)) {
+    try { await chrome.downloads.resume(delta.id); } catch (e) {}
+    return;
+  }
+
+  const minBytes = (config.minFileSize || 0) * 1024;
+  if (minBytes > 0) {
+    try {
+      const [item] = await chrome.downloads.search({ id: delta.id });
+      if (item && item.fileSize > 0 && item.fileSize < minBytes) {
+        try { await chrome.downloads.resume(delta.id); } catch (e) {}
+        return;
+      }
+    } catch (e) {}
+  }
+
+  await interceptDownload(delta.id, url, filename, referrer, config);
 });
 
 // =============================================
@@ -360,8 +557,16 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
 
   if (!url) return;
 
-  const filename = extractFilename(url);
+  let filename = extractFilename(url);
   const referrer = info.pageUrl || '';
+
+  // 如果从 URL 提取的文件名看起来不像真实文件名，尝试 HEAD 请求解析
+  if (!filename || looksLikeSlug(filename)) {
+    const resolved = await resolveFilename(url);
+    if (resolved && !looksLikeSlug(resolved)) {
+      filename = resolved;
+    }
+  }
 
   try {
     await sendToAria2(url, filename, referrer);
@@ -387,8 +592,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'addDownload') {
-    const filename = extractFilename(message.url);
-    sendToAria2(message.url, filename, '')
+    (async () => {
+      let filename = extractFilename(message.url);
+      if (!filename || looksLikeSlug(filename)) {
+        const resolved = await resolveFilename(message.url);
+        if (resolved && !looksLikeSlug(resolved)) {
+          filename = resolved;
+        }
+      }
+      return sendToAria2(message.url, filename, '');
+    })()
       .then(() => sendResponse({ success: true }))
       .catch(err => sendResponse({ success: false, error: getFriendlyRpcErrorMessage(err) }));
     return true;
