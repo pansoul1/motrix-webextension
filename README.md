@@ -6,7 +6,7 @@
 
 - **自动拦截** — 捕获浏览器下载并转发至 Motrix
 - **智能文件名** — 自动解析重定向链接的真实文件名，不再出现 `download-redirect` 等错误名称
-- **自动启动** — Motrix 未运行时自动通过 `motrix://` 协议唤起，等待就绪后发送下载
+- **自动启动** — Motrix 未运行时自动通过 Native Messaging 唤起（无弹窗），等待就绪后发送下载
 - **智能过滤** — 自动跳过 `blob:` / `data:` 链接，支持按文件扩展名和最小文件大小过滤
 - **右键菜单** — 右键任意链接或图片，一键发送到 Motrix 下载
 - **手动下载** — 在弹窗中直接粘贴 URL 发送到 Motrix
@@ -59,16 +59,31 @@
 4. 取消浏览器原生下载，通过 `aria2.addUri` JSON-RPC 请求发送到 Motrix
 5. 弹出通知提示下载成功或失败
 
-## 自动启动 Motrix
+## 自动启动 Motrix（无弹窗）
 
 当扩展检测到 Motrix 未运行（RPC 连接失败）时，会自动执行以下流程：
 
-1. 通过 `motrix://` 协议唤起 Motrix 应用
+1. 通过 **Native Messaging** 直接启动 Motrix（无浏览器弹窗）
 2. 页面显示"正在启动 Motrix…"提示
 3. 轮询等待 RPC 可用（最多 15 秒）
 4. Motrix 就绪后自动重试发送下载任务
 
-> **注意：** 首次触发时浏览器可能会弹出"是否允许打开 Motrix？"的确认框，点击允许后后续不会再弹出。
+### 安装 Native Messaging Host
+
+安装 Native Host 后，扩展可以直接启动 Motrix，**不再弹出"是否允许打开外部应用"的确认框**。
+
+**前置要求：** 已安装 [Node.js](https://nodejs.org/)
+
+1. 打开 PowerShell，进入项目的 `native-host` 目录
+2. 运行安装脚本：
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   ```
+3. 按提示输入浏览器扩展 ID（在 `chrome://extensions` 或 `edge://extensions` 中查看）
+4. 选择要注册的浏览器（Chrome / Edge / 两者）
+5. **重启浏览器**使设置生效
+
+> **未安装 Native Host？** 扩展会自动回退到 `motrix://` 协议方式（此时浏览器可能弹出确认框）。
 
 ## 失败回退（推荐开启）
 

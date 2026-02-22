@@ -9,7 +9,8 @@
     "storage",
     "notifications",
     "activeTab",
-    "tabs"
+    "tabs",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "http://localhost:16800/*",

@@ -1,0 +1,9 @@
+﻿{
+    "path":  "E:\\code\\Motrix\\native-host\\motrix_host.bat",
+    "description":  "Motrix Download Manager Native Messaging Host",
+    "name":  "com.nicedoc.motrix",
+    "allowed_origins":  [
+                            "chrome-extension://cmeaokhdoaokgemmpnfaloddgbfgbgcj/"
+                        ],
+    "type":  "stdio"
+}

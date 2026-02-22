@@ -132,26 +132,38 @@ async function postJsonRpc(rpcUrl, rpcBody) {
   return response.json();
 }
 
+const NATIVE_HOST_NAME = 'com.nicedoc.motrix';
+
 async function bringMotrixToFront() {
   try {
-    // 优先通过 content script 用隐藏 iframe 触发（不会切走当前页面）
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab && tab.id && tab.url && /^https?:/.test(tab.url)) {
-      try {
-        await chrome.tabs.sendMessage(tab.id, { type: 'openMotrix' });
-        return;
-      } catch (e) {
-        // content script 可能未注入，走备选方案
-      }
+    // 通过 Native Messaging 启动 Motrix（无浏览器弹窗）
+    const response = await chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'launch' });
+    if (response && response.success) {
+      console.log('[Motrix] 已通过 Native Host 启动 Motrix, method:', response.method);
+      return;
     }
-
-    // 备选：创建临时标签页触发 motrix:// 协议，然后关闭
-    const tempTab = await chrome.tabs.create({ url: 'motrix://', active: false });
-    setTimeout(() => {
-      chrome.tabs.remove(tempTab.id).catch(() => {});
-    }, 2000);
+    console.warn('[Motrix] Native Host 启动失败:', response);
   } catch (e) {
-    console.warn('[Motrix] 无法唤起 Motrix:', e);
+    console.warn('[Motrix] Native Messaging 不可用，回退到协议方式:', e.message);
+    // 回退：通过 content script 用隐藏 iframe 触发 motrix:// 协议
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab && tab.id && tab.url && /^https?:/.test(tab.url)) {
+        try {
+          await chrome.tabs.sendMessage(tab.id, { type: 'openMotrix' });
+          return;
+        } catch (e2) {
+          // content script 可能未注入
+        }
+      }
+      // 最终备选：创建临时标签页
+      const tempTab = await chrome.tabs.create({ url: 'motrix://', active: false });
+      setTimeout(() => {
+        chrome.tabs.remove(tempTab.id).catch(() => {});
+      }, 2000);
+    } catch (e2) {
+      console.warn('[Motrix] 所有启动方式均失败:', e2);
+    }
   }
 }
 
@@ -159,7 +171,7 @@ async function sendToastToActiveTab(data) {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab && tab.id) {
-      chrome.tabs.sendMessage(tab.id, { type: 'showToast', data });
+      chrome.tabs.sendMessage(tab.id, { type: 'showToast', data }).catch(() => {});
     }
   } catch (e) {
     // ignore - tab may not have content script
@@ -213,36 +225,52 @@ function isConnectionError(err) {
   return /failed to fetch|networkerror|econnrefused|net::err_connection_refused|connect/i.test(msg);
 }
 
+// 启动锁：防止多个下载同时触发多次 launchMotrixAndWait
+let _launchPromise = null;
+
 // 尝试启动 Motrix 并等待 RPC 可用
 async function launchMotrixAndWait(rpcUrl, rpcSecret) {
-  // 通过 content script 用 motrix:// 协议启动
-  await bringMotrixToFront();
-
-  await setLastStatus({
-    level: 'warning',
-    title: '正在启动 Motrix…',
-    message: '检测到 Motrix 未运行，正在尝试启动，请稍候'
-  });
-
-  // 轮询等待 RPC 可用，最多等 15 秒（间隔 1.5s 检测一次）
-  const MAX_WAIT = 15000;
-  const INTERVAL = 1500;
-  const start = Date.now();
-
-  while (Date.now() - start < MAX_WAIT) {
-    await new Promise(r => setTimeout(r, INTERVAL));
-    try {
-      let params = [];
-      if (rpcSecret) params = [`token:${rpcSecret}`];
-      const body = buildRpcRequest('aria2.getVersion', params);
-      const data = await postJsonRpc(rpcUrl, body);
-      if (data.result) return true;
-    } catch (e) {
-      // 还没启动好，继续等
-    }
+  // 如果已有一个启动流程在进行，复用它
+  if (_launchPromise) {
+    return _launchPromise;
   }
 
-  return false;
+  _launchPromise = (async () => {
+    try {
+      // 通过 Native Messaging 或协议启动 Motrix
+      await bringMotrixToFront();
+
+      await setLastStatus({
+        level: 'warning',
+        title: '正在启动 Motrix…',
+        message: '检测到 Motrix 未运行，正在尝试启动，请稍候'
+      });
+
+      // 轮询等待 RPC 可用，最多等 20 秒（间隔 1.5s 检测一次）
+      const MAX_WAIT = 20000;
+      const INTERVAL = 1500;
+      const start = Date.now();
+
+      while (Date.now() - start < MAX_WAIT) {
+        await new Promise(r => setTimeout(r, INTERVAL));
+        try {
+          let params = [];
+          if (rpcSecret) params = [`token:${rpcSecret}`];
+          const body = buildRpcRequest('aria2.getVersion', params);
+          const data = await postJsonRpc(rpcUrl, body);
+          if (data.result) return true;
+        } catch (e) {
+          // 还没启动好，继续等
+        }
+      }
+
+      return false;
+    } finally {
+      _launchPromise = null;
+    }
+  })();
+
+  return _launchPromise;
 }
 
 // 发送请求到 Motrix / aria2（含自动启动重试）
@@ -281,10 +309,13 @@ async function sendToAria2(url, filename, referrer) {
     } catch (firstErr) {
       // 如果是连接错误（Motrix 未启动），尝试自动启动后重试
       if (isConnectionError(firstErr)) {
+        console.log('[Motrix] RPC 连接失败，尝试启动 Motrix…');
         const launched = await launchMotrixAndWait(config.rpcUrl, config.rpcSecret);
         if (launched) {
+          console.log('[Motrix] Motrix RPC 已就绪，重试发送下载');
           data = await attemptSend();
         } else {
+          console.warn('[Motrix] 等待 Motrix RPC 超时');
           throw firstErr;
         }
       } else {
