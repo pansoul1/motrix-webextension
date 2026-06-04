@@ -115,7 +115,8 @@ async function postJsonRpc(rpcUrl, rpcBody) {
   const response = await fetch(rpcUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(rpcBody)
+    body: JSON.stringify(rpcBody),
+    signal: AbortSignal.timeout(10000)
   });
 
   if (!response.ok) {
@@ -323,7 +324,7 @@ async function sendToAria2(url, filename, referrer) {
       }
     }
 
-    chrome.notifications.create({
+    chrome.notifications.create('motrix-success', {
       type: 'basic',
       iconUrl: 'icons/icon128.png',
       title: 'Motrix 下载已添加',
@@ -429,7 +430,7 @@ async function interceptDownload(downloadId, url, filename, referrer, config) {
           message: err.message
         });
 
-        chrome.notifications.create({
+        chrome.notifications.create('motrix-fallback', {
           type: 'basic',
           iconUrl: 'icons/icon128.png',
           title: 'Motrix 不可用，已恢复浏览器下载',
@@ -445,7 +446,7 @@ async function interceptDownload(downloadId, url, filename, referrer, config) {
         message: err.message
       });
 
-      chrome.notifications.create({
+      chrome.notifications.create('motrix-error', {
         type: 'basic',
         iconUrl: 'icons/icon128.png',
         title: 'Motrix 下载失败',
@@ -463,9 +464,8 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
   const url = downloadItem.url;
   if (shouldSkipUrl(url)) return;
 
-  // 只拦截 http/https，跳过 blob:/data:
+  // 快速过滤：只拦截 http/https
   if (!url.startsWith('http://') && !url.startsWith('https://')) return;
-  if (url.startsWith('blob:') || url.startsWith('data:')) return;
 
   const referrer = downloadItem.referrer || '';
 
@@ -602,7 +602,7 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
   try {
     await sendToAria2(url, filename, referrer);
   } catch (err) {
-    chrome.notifications.create({
+    chrome.notifications.create('motrix-ctx-error', {
       type: 'basic',
       iconUrl: 'icons/icon128.png',
       title: 'Motrix 下载失败',

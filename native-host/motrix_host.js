@@ -106,10 +106,32 @@ function findMotrix() {
   return null;
 }
 
+// --- 检测 Motrix 是否已在运行 ---
+
+function isMotrixRunning() {
+  try {
+    const { execSync } = require('child_process');
+    const output = execSync('tasklist /FI "IMAGENAME eq Motrix.exe" /NH', {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true
+    });
+    return output.toLowerCase().includes('motrix.exe');
+  } catch (e) {
+    return false;
+  }
+}
+
 // --- 启动 Motrix ---
 
 function launchMotrix() {
   return new Promise((resolve) => {
+    // 如果 Motrix 已在运行，无需重复启动
+    if (isMotrixRunning()) {
+      resolve({ success: true, method: 'already_running' });
+      return;
+    }
+
     const motrixPath = findMotrix();
 
     if (motrixPath) {

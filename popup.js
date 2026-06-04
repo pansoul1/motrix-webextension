@@ -88,11 +88,12 @@ function updateStatusBar(enabled) {
 
 // 显示结果消息
 function showResult(element, message, isSuccess) {
+  const baseClass = element.id === 'downloadResult' ? 'download-result' : 'test-result';
   element.textContent = message;
-  element.className = isSuccess ? 'test-result show success' : 'test-result show error';
+  element.className = isSuccess ? `${baseClass} show success` : `${baseClass} show error`;
 
   setTimeout(() => {
-    element.className = 'test-result';
+    element.className = baseClass;
     element.textContent = '';
   }, 5000);
 }
